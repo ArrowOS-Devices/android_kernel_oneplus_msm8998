@@ -149,6 +149,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCP_RESOURCE_PROBE_INTERVAL ((unsigned)(HZ/2U)) /* Maximal interval between probes
 					                 * for local resources.
 					                 */
+#define TCP_REO_TIMEOUT_MIN	(2000) /* Min RACK reordering timeout in usec */
 
 #define TCP_KEEPALIVE_TIME	(120*60*HZ)	/* two hours */
 #define TCP_KEEPALIVE_PROBES	9		/* Max of 9 keepalive probes	*/
@@ -280,6 +281,9 @@ extern int sysctl_tcp_slow_start_after_idle;
 extern int sysctl_tcp_thin_linear_timeouts;
 extern int sysctl_tcp_thin_dupack;
 extern int sysctl_tcp_early_retrans;
+extern int sysctl_tcp_recovery;
+#define TCP_RACK_LOSS_DETECTION  0x1 /* Use RACK to detect losses */
+
 extern int sysctl_tcp_limit_output_bytes;
 extern int sysctl_tcp_challenge_ack_limit;
 extern unsigned int sysctl_tcp_notsent_lowat;
@@ -379,7 +383,7 @@ void tcp_delack_timer_handler(struct sock *sk);
 int tcp_ioctl(struct sock *sk, int cmd, unsigned long arg);
 int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb);
 void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
-			 const struct tcphdr *th, unsigned int len);
+			 const struct tcphdr *th);
 void tcp_rcv_space_adjust(struct sock *sk);
 int tcp_twsk_unique(struct sock *sk, struct sock *sktw, void *twp);
 void tcp_twsk_destructor(struct sock *sk);
@@ -431,6 +435,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 int tcp_child_process(struct sock *parent, struct sock *child,
 		      struct sk_buff *skb);
 void tcp_enter_loss(struct sock *sk);
+void tcp_cwnd_reduction(struct sock *sk, int newly_acked_sacked, int flag);
 void tcp_clear_retrans(struct tcp_sock *tp);
 void tcp_update_metrics(struct sock *sk);
 void tcp_init_metrics(struct sock *sk);
@@ -457,7 +462,7 @@ void tcp_set_keepalive(struct sock *sk, int val);
 void tcp_syn_ack_timeout(const struct request_sock *req);
 int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 		int flags, int *addr_len);
-void tcp_parse_options(const struct sk_buff *skb,
+void tcp_parse_options(const struct net *net, const struct sk_buff *skb,
 		       struct tcp_options_received *opt_rx,
 		       int estab, struct tcp_fastopen_cookie *foc);
 const u8 *tcp_parse_md5sig_option(const struct tcphdr *th);
@@ -552,7 +557,7 @@ static inline u32 tcp_cookie_time(void)
 u32 __cookie_v4_init_sequence(const struct iphdr *iph, const struct tcphdr *th,
 			      u16 *mssp);
 __u32 cookie_v4_init_sequence(const struct sk_buff *skb, __u16 *mss);
-__u32 cookie_init_timestamp(struct request_sock *req);
+u64 cookie_init_timestamp(struct request_sock *req);
 bool cookie_timestamp_decode(struct tcp_options_received *opt);
 bool cookie_ecn_ok(const struct tcp_options_received *opt,
 		   const struct net *net, const struct dst_entry *dst);
@@ -571,11 +576,12 @@ __u32 cookie_v6_init_sequence(const struct sk_buff *skb, __u16 *mss);
 void __tcp_push_pending_frames(struct sock *sk, unsigned int cur_mss,
 			       int nonagle);
 bool tcp_may_send_now(struct sock *sk);
-int __tcp_retransmit_skb(struct sock *, struct sk_buff *);
-int tcp_retransmit_skb(struct sock *, struct sk_buff *);
+int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs);
+int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs);
 void tcp_retransmit_timer(struct sock *sk);
 void tcp_xmit_retransmit_queue(struct sock *);
 void tcp_simple_retransmit(struct sock *);
+void tcp_enter_recovery(struct sock *sk, bool ece_ack);
 int tcp_trim_head(struct sock *, struct sk_buff *, u32);
 int tcp_fragment(struct sock *, struct sk_buff *, u32, unsigned int, gfp_t);
 
@@ -593,16 +599,17 @@ void tcp_send_loss_probe(struct sock *sk);
 bool tcp_schedule_loss_probe(struct sock *sk);
 
 /* tcp_input.c */
-void tcp_resume_early_retransmit(struct sock *sk);
 void tcp_rearm_rto(struct sock *sk);
 void tcp_synack_rtt_meas(struct sock *sk, struct request_sock *req);
 void tcp_reset(struct sock *sk);
 void tcp_skb_mark_lost_uncond_verify(struct tcp_sock *tp, struct sk_buff *skb);
+void tcp_fin(struct sock *sk);
 
 /* tcp_timer.c */
 void tcp_init_xmit_timers(struct sock *);
 static inline void tcp_clear_xmit_timers(struct sock *sk)
 {
+	hrtimer_cancel(&tcp_sk(sk)->pacing_timer);
 	inet_csk_clear_xmit_timers(sk);
 }
 
@@ -706,7 +713,7 @@ static inline bool tcp_ca_dst_locked(const struct dst_entry *dst)
 /* Minimum RTT in usec. ~0 means not available. */
 static inline u32 tcp_min_rtt(const struct tcp_sock *tp)
 {
-	return tp->rtt_min[0].rtt;
+	return minmax_get(&tp->rtt_min);
 }
 
 /* Compute the actual receive window we are currently advertising.
@@ -730,17 +737,56 @@ u32 __tcp_select_window(struct sock *sk);
 
 void tcp_send_window_probe(struct sock *sk);
 
-/* TCP timestamps are only 32-bits, this causes a slight
- * complication on 64-bit systems since we store a snapshot
- * of jiffies in the buffer control blocks below.  We decided
- * to use only the low 32-bits of jiffies and hide the ugly
- * casts with the following macro.
+/* TCP uses 32bit jiffies to save some space.
+ * Note that this is different from tcp_time_stamp, which
+ * historically has been the same until linux-4.13.
  */
-#define tcp_time_stamp		((__u32)(jiffies))
+#define tcp_jiffies32 ((u32)jiffies)
+
+/*
+ * Deliver a 32bit value for TCP timestamp option (RFC 7323)
+ * It is no longer tied to jiffies, but to 1 ms clock.
+ * Note: double check if you want to use tcp_jiffies32 instead of this.
+ */
+#define TCP_TS_HZ	1000
+
+static inline u64 tcp_clock_ns(void)
+{
+	return local_clock();
+}
+
+static inline u64 tcp_clock_us(void)
+{
+	return div_u64(tcp_clock_ns(), NSEC_PER_USEC);
+}
+
+/* This should only be used in contexts where tp->tcp_mstamp is up to date */
+static inline u32 tcp_time_stamp(const struct tcp_sock *tp)
+{
+	return div_u64(tp->tcp_mstamp, USEC_PER_SEC / TCP_TS_HZ);
+}
+
+/* Could use tcp_clock_us() / 1000, but this version uses a single divide */
+static inline u32 tcp_time_stamp_raw(void)
+{
+	return div_u64(tcp_clock_ns(), NSEC_PER_SEC / TCP_TS_HZ);
+}
+
+void tcp_mstamp_refresh(struct tcp_sock *tp);
+
+static inline u32 tcp_stamp_us_delta(u64 t1, u64 t0)
+{
+	return max_t(s64, t1 - t0, 0);
+}
+
+static inline u32 tcp_stamp32_us_delta(u32 t1, u32 t0)
+{
+	return max_t(s32, t1 - t0, 0);
+}
 
 static inline u32 tcp_skb_timestamp(const struct sk_buff *skb)
 {
-	return skb->skb_mstamp.stamp_jiffies;
+	return div_u64(skb->skb_mstamp, USEC_PER_SEC / TCP_TS_HZ);
 }
 
 
@@ -795,11 +841,31 @@ struct tcp_skb_cb {
 	/* 1 byte hole */
 	__u32		ack_seq;	/* Sequence number ACK'd	*/
 	union {
-		struct inet_skb_parm	h4;
+		struct {
+#define TCPCB_DELIVERED_CE_MASK ((1U<<20) - 1)
+			/* There is space for up to 24 bytes */
+			__u32 is_app_limited:1, /* cwnd not fully used? */
+			      delivered_ce:20,
+			      unused:11;
+			/* pkts S/ACKed so far upon tx of skb, incl retrans: */
+			__u32 delivered;
+			/* start of send pipeline phase */
+			u32 first_tx_mstamp;
+			/* when we reached the "delivered" count */
+			u32 delivered_mstamp;
+#define TCPCB_IN_FLIGHT_BITS 20
+#define TCPCB_IN_FLIGHT_MAX ((1U << TCPCB_IN_FLIGHT_BITS) - 1)
+			u32 in_flight:20,   /* packets in flight at transmit */
+			    unused2:12;
+			u32 lost;	/* packets lost so far upon tx of skb */
+		} tx;   /* only used for outgoing skbs */
+		union {
+			struct inet_skb_parm	h4;
 #if IS_ENABLED(CONFIG_IPV6)
-		struct inet6_skb_parm	h6;
+			struct inet6_skb_parm	h6;
 #endif
-	} header;	/* For incoming frames		*/
+		} header;	/* For incoming skbs */
+	};
 };
 
 #define TCP_SKB_CB(__skb)	((struct tcp_skb_cb *)&((__skb)->cb[0]))
@@ -869,8 +935,44 @@ enum tcp_ca_ack_event_flags {
 #define TCP_CONG_NON_RESTRICTED 0x1
 /* Requires ECN/ECT set on all packets */
 #define TCP_CONG_NEEDS_ECN	0x2
+/* Wants notification of CE events (CA_EVENT_ECN_IS_CE, CA_EVENT_ECN_NO_CE). */
+#define TCP_CONG_WANTS_CE_EVENTS	0x100000
 
 union tcp_cc_info;
+
+struct ack_sample {
+	u32 pkts_acked;
+	s32 rtt_us;
+	u32 in_flight;
+};
+
+/* A rate sample measures the number of (original/retransmitted) data
+ * packets delivered "delivered" over an interval of time "interval_us".
+ * The tcp_rate.c code fills in the rate sample, and congestion
+ * control modules that define a cong_control function to run at the end
+ * of ACK processing can optionally chose to consult this sample when
+ * setting cwnd and pacing rate.
+ * A sample is invalid if "delivered" or "interval_us" is negative.
+ */
+struct rate_sample {
+	u64  prior_mstamp; /* starting timestamp for interval */
+	u32  prior_lost;	/* tp->lost at "prior_mstamp" */
+	u32  prior_delivered;	/* tp->delivered at "prior_mstamp" */
+	u32  prior_delivered_ce;/* tp->delivered_ce at "prior_mstamp" */
+	u32 tx_in_flight;	/* packets in flight at starting timestamp */
+	s32  lost;		/* number of packets lost over interval */
+	s32  delivered;		/* number of packets delivered over interval */
+	s32  delivered_ce;	/* packets delivered w/ CE mark over interval */
+	long interval_us;	/* time for tp->delivered to incr "delivered" */
+	long rtt_us;		/* RTT of last (S)ACKed packet (or -1) */
+	int  losses;		/* number of packets marked lost upon ACK */
+	u32  acked_sacked;	/* number of packets newly (S)ACKed upon ACK */
+	u32  prior_in_flight;	/* in flight before this ACK */
+	bool is_app_limited;	/* is sample from packet with bubble in pipe? */
+	bool is_retrans;	/* is sample from retransmission? */
+	bool is_ack_delayed;	/* is this (likely) a delayed ACK? */
+	bool is_ece;		/* did this ACK have ECN marked? */
+};
 
 struct tcp_congestion_ops {
 	struct list_head	list;
@@ -895,7 +997,17 @@ struct tcp_congestion_ops {
 	/* new value of cwnd after loss (optional) */
 	u32  (*undo_cwnd)(struct sock *sk);
 	/* hook for packet ack accounting (optional) */
-	void (*pkts_acked)(struct sock *sk, u32 num_acked, s32 rtt_us);
+	void (*pkts_acked)(struct sock *sk, const struct ack_sample *sample);
+	/* override sysctl_tcp_min_tso_segs */
+	u32 (*min_tso_segs)(struct sock *sk);
+	/* returns the multiplier used in tcp_sndbuf_expand (optional) */
+	u32 (*sndbuf_expand)(struct sock *sk);
+	/* react to a specific lost skb (optional) */
+	void (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);
+	/* call when packets are delivered to update cwnd and pacing rate,
+	 * after all the ca_state processing. (optional)
+	 */
+	void (*cong_control)(struct sock *sk, const struct rate_sample *rs);
 	/* get info for inet_diag (optional) */
 	size_t (*get_info)(struct sock *sk, u32 ext, int *attr,
 			   union tcp_cc_info *info);
@@ -935,6 +1047,14 @@ static inline char *tcp_ca_get_name_by_key(u32 key, char *buffer)
 }
 #endif
 
+static inline bool tcp_ca_wants_ce_events(const struct sock *sk)
+{
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+
+	return icsk->icsk_ca_ops->flags & (TCP_CONG_NEEDS_ECN |
+					   TCP_CONG_WANTS_CE_EVENTS);
+}
+
 static inline bool tcp_ca_needs_ecn(const struct sock *sk)
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
@@ -958,6 +1078,15 @@ static inline void tcp_ca_event(struct sock *sk, const enum tcp_ca_event event)
 	if (icsk->icsk_ca_ops->cwnd_event)
 		icsk->icsk_ca_ops->cwnd_event(sk, event);
 }
+
+/* From tcp_rate.c */
+void tcp_set_tx_in_flight(struct sock *sk, struct sk_buff *skb);
+void tcp_rate_skb_sent(struct sock *sk, struct sk_buff *skb);
+void tcp_rate_skb_delivered(struct sock *sk, struct sk_buff *skb,
+			    struct rate_sample *rs);
+void tcp_rate_gen(struct sock *sk, u32 delivered, u32 lost,
+		  struct rate_sample *rs);
+void tcp_rate_check_app_limited(struct sock *sk);
 
 /* These functions determine how the current flow behaves in respect of SACK
  * handling. SACK is negotiated with the peer, and therefore it can vary
@@ -985,21 +1114,6 @@ static inline bool tcp_is_fack(const struct tcp_sock *tp)
 static inline void tcp_enable_fack(struct tcp_sock *tp)
 {
 	tp->rx_opt.sack_ok |= TCP_FACK_ENABLED;
-}
-
-/* TCP early-retransmit (ER) is similar to but more conservative than
- * the thin-dupack feature.  Enable ER only if thin-dupack is disabled.
- */
-static inline void tcp_enable_early_retrans(struct tcp_sock *tp)
-{
-	tp->do_early_retrans = sysctl_tcp_early_retrans &&
-		sysctl_tcp_early_retrans < 4 && !sysctl_tcp_thin_dupack &&
-		sysctl_tcp_reordering == 3;
-}
-
-static inline void tcp_disable_early_retrans(struct tcp_sock *tp)
-{
-	tp->do_early_retrans = 0;
 }
 
 static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
@@ -1115,6 +1229,17 @@ static inline bool tcp_is_cwnd_limited(const struct sock *sk)
 	return tp->is_cwnd_limited;
 }
 
+/* BBR congestion control needs pacing.
+ * Same remark for SO_MAX_PACING_RATE.
+ * sch_fq packet scheduler is efficiently handling pacing,
+ * but is not always installed/used.
+ * Return true if TCP stack should pace packets itself.
+ */
+static inline bool tcp_needs_internal_pacing(const struct sock *sk)
+{
+	return smp_load_acquire(&sk->sk_pacing_status) == SK_PACING_NEEDED;
+}
+
 /* Something is really bad, we could not queue an additional packet,
  * because qdisc is full or receiver sent a 0 window.
  * We do not want to add fuel to the fire, or abort too early,
@@ -1216,7 +1341,7 @@ static inline void tcp_slow_start_after_idle_check(struct sock *sk)
 
 	if (!sysctl_tcp_slow_start_after_idle || tp->packets_out)
 		return;
-	delta = tcp_time_stamp - tp->lsndtime;
+	delta = tcp_jiffies32 - tp->lsndtime;
 	if (delta > inet_csk(sk)->icsk_rto)
 		tcp_cwnd_restart(sk, delta);
 }
@@ -1272,8 +1397,8 @@ static inline u32 keepalive_time_elapsed(const struct tcp_sock *tp)
 {
 	const struct inet_connection_sock *icsk = &tp->inet_conn;
 
-	return min_t(u32, tcp_time_stamp - icsk->icsk_ack.lrcvtime,
-			  tcp_time_stamp - tp->rcv_tstamp);
+	return min_t(u32, tcp_jiffies32 - icsk->icsk_ack.lrcvtime,
+			  tcp_jiffies32 - tp->rcv_tstamp);
 }
 
 static inline int tcp_fin_time(const struct sock *sk)
@@ -1463,11 +1588,15 @@ void tcp_free_fastopen_req(struct tcp_sock *tp);
 
 extern struct tcp_fastopen_context __rcu *tcp_fastopen_ctx;
 int tcp_fastopen_reset_cipher(void *key, unsigned int len);
+void tcp_fastopen_add_skb(struct sock *sk, struct sk_buff *skb);
 struct sock *tcp_try_fastopen(struct sock *sk, struct sk_buff *skb,
 			      struct request_sock *req,
 			      struct tcp_fastopen_cookie *foc,
 			      struct dst_entry *dst);
 void tcp_fastopen_init_key_once(bool publish);
+bool tcp_fastopen_cookie_check(struct sock *sk, u16 *mss,
+			     struct tcp_fastopen_cookie *cookie);
+bool tcp_fastopen_defer_connect(struct sock *sk, int *err);
 #define TCP_FASTOPEN_KEY_LENGTH 16
 
 static inline void tcp_init_send_head(struct sock *sk)
@@ -1482,11 +1611,32 @@ struct tcp_fastopen_context {
 	struct rcu_head		rcu;
 };
 
+extern unsigned int sysctl_tcp_fastopen_blackhole_timeout;
+void tcp_fastopen_active_disable(struct sock *sk);
+bool tcp_fastopen_active_should_disable(struct sock *sk);
+void tcp_fastopen_active_disable_ofo_check(struct sock *sk);
+void tcp_fastopen_active_timeout_reset(void);
+
+/* Latencies incurred by various limits for a sender. They are
+ * chronograph-like stats that are mutually exclusive.
+ */
+enum tcp_chrono {
+	TCP_CHRONO_UNSPEC,
+	TCP_CHRONO_BUSY, /* Actively sending data (non-empty write queue) */
+	TCP_CHRONO_RWND_LIMITED, /* Stalled by insufficient receive window */
+	TCP_CHRONO_SNDBUF_LIMITED, /* Stalled by insufficient send buffer */
+	__TCP_CHRONO_MAX,
+};
+
+void tcp_chrono_start(struct sock *sk, const enum tcp_chrono type);
+void tcp_chrono_stop(struct sock *sk, const enum tcp_chrono type);
+
 /* write queue abstraction */
 static inline void tcp_write_queue_purge(struct sock *sk)
 {
 	struct sk_buff *skb;
 
+	tcp_chrono_stop(sk, TCP_CHRONO_BUSY);
 	while ((skb = __skb_dequeue(&sk->sk_write_queue)) != NULL)
 		sk_wmem_free_skb(sk, skb);
 	sk_mem_reclaim(sk);
@@ -1547,8 +1697,10 @@ static inline void tcp_advance_send_head(struct sock *sk, const struct sk_buff *
 
 static inline void tcp_check_send_head(struct sock *sk, struct sk_buff *skb_unlinked)
 {
-	if (sk->sk_send_head == skb_unlinked)
+	if (sk->sk_send_head == skb_unlinked) {
 		sk->sk_send_head = NULL;
+		tcp_chrono_stop(sk, TCP_CHRONO_BUSY);
+	}
 	if (tcp_sk(sk)->highest_sack == skb_unlinked)
 		tcp_sk(sk)->highest_sack = NULL;
 }
@@ -1586,6 +1738,7 @@ static inline void tcp_add_write_queue_tail(struct sock *sk, struct sk_buff *skb
 	/* Queue it, remembering where we must start sending. */
 	if (sk->sk_send_head == NULL) {
 		sk->sk_send_head = skb;
+		tcp_chrono_start(sk, TCP_CHRONO_BUSY);
 
 		if (tcp_sk(sk)->highest_sack == NULL)
 			tcp_sk(sk)->highest_sack = skb;
@@ -1780,7 +1933,7 @@ struct tcp_request_sock_ops {
 	struct dst_entry *(*route_req)(const struct sock *sk, struct flowi *fl,
 				       const struct request_sock *req,
 				       bool *strict);
-	__u32 (*init_seq)(const struct sk_buff *skb);
+	__u32 (*init_seq)(const struct sk_buff *skb, u32 *tsoff);
 	int (*send_synack)(const struct sock *sk, struct dst_entry *dst,
 			   struct flowi *fl, struct request_sock *req,
 			   struct tcp_fastopen_cookie *foc,
@@ -1811,17 +1964,10 @@ void tcp_v4_init(void);
 void tcp_init(void);
 
 /* tcp_recovery.c */
-
-/* Flags to enable various loss recovery features. See below */
-extern int sysctl_tcp_recovery;
-
-/* Use TCP RACK to detect (some) tail and retransmit losses */
-#define TCP_RACK_LOST_RETRANS  0x1
-
-extern int tcp_rack_mark_lost(struct sock *sk);
-
-extern void tcp_rack_advance(struct tcp_sock *tp,
-			     const struct skb_mstamp *xmit_time, u8 sacked);
+extern void tcp_rack_mark_lost(struct sock *sk);
+extern void tcp_rack_advance(struct tcp_sock *tp, u8 sacked, u32 end_seq,
+			     u64 xmit_time);
+extern void tcp_rack_reo_timeout(struct sock *sk);
 
 /*
  * Save and compile IPv4 options, return a pointer to it
@@ -1857,5 +2003,41 @@ static inline void skb_set_tcp_pure_ack(struct sk_buff *skb)
 {
 	skb->truesize = 2;
 }
+
+static inline int tcp_inq(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int answ;
+
+	if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
+		answ = 0;
+	} else if (sock_flag(sk, SOCK_URGINLINE) ||
+		   !tp->urg_data ||
+		   before(tp->urg_seq, tp->copied_seq) ||
+		   !before(tp->urg_seq, tp->rcv_nxt)) {
+
+		answ = tp->rcv_nxt - tp->copied_seq;
+
+		/* Subtract 1, if FIN was received */
+		if (answ && sock_flag(sk, SOCK_DONE))
+			answ--;
+	} else {
+		answ = tp->urg_seq - tp->copied_seq;
+	}
+
+	return answ;
+}
+
+static inline void tcp_segs_in(struct tcp_sock *tp, const struct sk_buff *skb)
+{
+	u16 segs_in;
+
+	segs_in = max_t(u16, 1, skb_shinfo(skb)->gso_segs);
+	tp->segs_in += segs_in;
+	if (skb->len > tcp_hdrlen(skb))
+		tp->data_segs_in += segs_in;
+}
+
+enum hrtimer_restart tcp_pace_kick(struct hrtimer *timer);
 
 #endif	/* _TCP_H */

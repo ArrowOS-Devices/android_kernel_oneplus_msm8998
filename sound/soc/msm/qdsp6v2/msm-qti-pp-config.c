@@ -689,7 +689,7 @@ static void msm_qti_pp_asphere_init_state(void)
 	}
 	asphere_state.enabled = 1;
 	asphere_state.strength = 500;
-	asphere_state.mode = 1;
+	asphere_state.mode = 2;
 	asphere_state.version = 0;
 	asphere_state.enabled_prev = 0;
 	asphere_state.strength_prev = 0;
@@ -703,7 +703,7 @@ static int msm_qti_pp_asphere_send_params(int port_id, int copp_idx, bool force)
 	u32 param_size = 0;
 	struct param_hdr_v3 param_hdr = {0};
 	bool set_enable = force ||
-			(asphere_state.enabled != asphere_state.enabled_prev);
+		(asphere_state.enabled != asphere_state.enabled_prev);
 	bool set_strength = asphere_state.enabled == 1 && (set_enable ||
 		(asphere_state.strength != asphere_state.strength_prev));
 	bool set_mode = asphere_state.enabled == 1 && (set_enable ||
@@ -852,41 +852,10 @@ static int msm_qti_pp_asphere_get(struct snd_kcontrol *kcontrol,
 static int msm_qti_pp_asphere_set(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	int32_t enable = ucontrol->value.integer.value[0];
-	int32_t strength = ucontrol->value.integer.value[1];
-	int32_t mode = ucontrol->value.integer.value[2];
-	int i;
-
-	pr_debug("%s, enable %u, strength %u\n", __func__, enable, strength);
-
+	/* Only init and set default values */
 	msm_qti_pp_asphere_init_state();
-
-	if (enable == 0 || enable == 1) {
-		asphere_state.enabled_prev = asphere_state.enabled;
-		asphere_state.enabled = enable;
-	}
-
-	if (strength >= 0 && strength <= 1000) {
-		asphere_state.strength_prev = asphere_state.strength;
-		asphere_state.strength = strength;
-	}
-
-	if (mode == 0 || mode == 1) {
-		asphere_state.mode_prev = asphere_state.mode;
-		asphere_state.mode = mode;
-	}
-
-	if (asphere_state.strength != asphere_state.strength_prev ||
-		asphere_state.enabled != asphere_state.enabled_prev || 
-		asphere_state.mode != asphere_state.mode_prev) {
-		for (i = 0; i < AFE_MAX_PORTS; i++) {
-			if (asphere_state.port_id[i] >= 0)
-				msm_qti_pp_asphere_send_params(
-					asphere_state.port_id[i],
-					asphere_state.copp_idx[i],
-					false);
-		}
-	}
+	pr_debug("%s, enable %u, strength %u, mode %u\n", __func__,
+		asphere_state.enabled, asphere_state.strength, asphere_state.mode);
 	return 0;
 }
 
