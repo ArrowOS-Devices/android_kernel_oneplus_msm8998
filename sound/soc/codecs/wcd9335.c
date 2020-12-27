@@ -3705,10 +3705,6 @@ static int tasha_get_compander(struct snd_kcontrol *kcontrol,
 		    kcontrol->private_value)->shift;
 	struct tasha_priv *tasha = snd_soc_codec_get_drvdata(codec);
 
-	/* Disable companders unless CLS_H_LP is set for calls */
-	if (tasha->hph_mode != CLS_H_LP)
-		tasha->comp_enabled[comp] = 0;
-
 	ucontrol->value.integer.value[0] = tasha->comp_enabled[comp];
 	return 0;
 }
@@ -3721,10 +3717,6 @@ static int tasha_set_compander(struct snd_kcontrol *kcontrol,
 	int comp = ((struct soc_multi_mixer_control *)
 		    kcontrol->private_value)->shift;
 	int value = ucontrol->value.integer.value[0];
-
-	/* Disable companders unless CLS_H_LP is set for calls */
-	if (tasha->hph_mode != CLS_H_LP)
-		value = 0;
 
 	pr_debug("%s: Compander %d enable current %d, new %d\n",
 		 __func__, comp + 1, tasha->comp_enabled[comp], value);
@@ -7943,10 +7935,6 @@ static int tasha_rx_hph_mode_get(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
 	struct tasha_priv *tasha = snd_soc_codec_get_drvdata(codec);
-
-	/* Set to CLS_AB unless CLS_H_LP is set for calls */
-	if (tasha->hph_mode != CLS_H_LP)
-		tasha->hph_mode = CLS_AB;
 
 	ucontrol->value.integer.value[0] = tasha->hph_mode;
 	return 0;
@@ -13761,8 +13749,8 @@ pr_err("%s enter\n", __func__);
 	}
 	/* Class-H Init*/
 	wcd_clsh_init(&tasha->clsh_d);
-	/* Default HPH Mode to Class-H HiFi */
-	tasha->hph_mode = CLS_H_HIFI;
+	/* Default HPH Mode to Class-AB */
+	tasha->hph_mode = CLS_AB;
 
 	tasha->codec = codec;
 	for (i = 0; i < COMPANDER_MAX; i++)

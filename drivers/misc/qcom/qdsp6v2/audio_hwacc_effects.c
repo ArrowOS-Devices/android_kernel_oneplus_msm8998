@@ -39,28 +39,31 @@ struct q6audio_effects {
 	struct msm_nt_eff_all_config audio_effects;
 };
 
-static int msm_audio_effects_init_extn(struct q6audio_effects *effects)
+static void msm_audio_effects_apply_extn(struct q6audio_effects *effects)
 {
 	struct msm_nt_eff_all_config *msm_effects = &effects->audio_effects;
 	struct audio_client *ac = effects->ac;
+	int ret = 0;
 
 	/* Bass boost */
 	msm_effects->bass_boost.enable_flag = true;
 	msm_effects->bass_boost.mode = 2;
-	msm_effects->bass_boost.strength = 25;
+	msm_effects->bass_boost.strength = 75;
 
 	/* Virtualizer */
 	msm_effects->virtualizer.enable_flag = true;
 	msm_effects->virtualizer.out_type = 4;
-	msm_effects->virtualizer.strength = 10;
-	msm_effects->virtualizer.gain_adjust = 0;
+	msm_effects->virtualizer.strength = 50;
+	msm_effects->virtualizer.gain_adjust = 5;
 
-	return msm_audio_effects_enable_extn(ac, msm_effects, true);
+	ret = msm_audio_effects_enable_extn(ac, msm_effects, true);
+	if (ret < 0)
+		pr_err("%s: Send msm audio effects extn params failed ret=%d\n",
+			__func__, ret);
 }
 
-static void audio_effects_init_pp(struct q6audio_effects *effects)
+static void audio_effects_init_pp(struct audio_client *ac)
 {
-	struct audio_client *ac = effects->ac;
 	struct asm_softvolume_params softvol = {
 		.period = SOFT_VOLUME_PERIOD,
 		.step = SOFT_VOLUME_STEP,
@@ -77,11 +80,6 @@ static void audio_effects_init_pp(struct q6audio_effects *effects)
 				      SOFT_VOLUME_INSTANCE_1);
 	if (ret < 0)
 		pr_err("%s: Send SoftVolume Param failed ret=%d\n",
-			__func__, ret);
-
-	ret = msm_audio_effects_init_extn(effects);
-	if (ret < 0)
-		pr_err("%s: Send msm audio effects extn params failed ret=%d\n",
 			__func__, ret);
 }
 
@@ -218,7 +216,10 @@ static int audio_effects_shared_ioctl(struct file *file, unsigned cmd,
 			goto cfg_fail;
 		}
 
-		audio_effects_init_pp(effects);
+		audio_effects_init_pp(effects->ac);
+
+		/* Overwrite effect values */
+		msm_audio_effects_apply_extn(effects);
 
 		rc = q6asm_run(effects->ac, 0x00, 0x00, 0x00);
 		if (!rc)
@@ -276,6 +277,8 @@ static int audio_effects_shared_ioctl(struct file *file, unsigned cmd,
 				mutex_unlock(&effects->lock);
 				goto ioctl_fail;
 			}
+			/* Overwrite effect values */
+			msm_audio_effects_apply_extn(effects);
 			atomic_dec(&effects->out_count);
 		} else {
 			pr_err("%s: AUDIO_EFFECTS_WRITE: Buffer dropped\n",

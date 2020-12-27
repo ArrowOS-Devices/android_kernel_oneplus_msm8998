@@ -3570,7 +3570,7 @@ static inline unsigned long rlimit_max(unsigned int limit)
 
 /* Sugov flags to control limit */
 #define SUGOV_LIMIT             (1U << 3)
-#define SUGOV_LIMIT_SWAP        (1U << 4)
+#define SUGOV_LIMIT_ACTIVE      (1U << 4)
 
 #ifdef CONFIG_CPU_FREQ
 struct update_util_data {
