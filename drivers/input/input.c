@@ -318,7 +318,7 @@ static int input_get_disposition(struct input_dev *dev,
 		if (is_event_supported(code, dev->absbit, ABS_MAX))
 			disposition = input_handle_abs_event(dev, code, &value);
 #ifdef CONFIG_DYNAMIC_STUNE
-		if (disposition != INPUT_IGNORE_EVENT && dynstune_acquire_update(INPUT))
+		if (disposition != INPUT_IGNORE_EVENT && !dynstune_acquire_update(INPUT))
 			dynstune_wake(INPUT);
 #endif /* CONFIG_DYNAMIC_STUNE */
 

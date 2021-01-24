@@ -39,43 +39,125 @@ struct q6audio_effects {
 	struct msm_nt_eff_all_config audio_effects;
 };
 
-static void msm_audio_effects_apply_extn(struct q6audio_effects *effects)
+static void msm_audio_effects_set(struct q6audio_effects *effects)
 {
 	struct msm_nt_eff_all_config *msm_effects = &effects->audio_effects;
 	struct audio_client *ac = effects->ac;
-	int ret = 0;
+	struct param_hdr_v3 param_hdr = {0};
+	int curr_val = 0, ret = 0;
 
-	/* Bass boost */
-	msm_effects->bass_boost.enable_flag = true;
-	msm_effects->bass_boost.mode = 2;
-	msm_effects->bass_boost.strength = 75;
+	/*
+	 * Basis for the constant ranges:
+	 * https://github.com/jgcaaprom/packages_apps_SnapdragonAudio/blob/lp-mr1/src/com/android/audiofx/OpenSLESConstants.java
+	 */
 
-	/* Virtualizer */
-	msm_effects->virtualizer.enable_flag = true;
-	msm_effects->virtualizer.out_type = 4;
-	msm_effects->virtualizer.strength = 50;
-	msm_effects->virtualizer.gain_adjust = 5;
+	curr_val = msm_effects->bass_boost.strength;
 
-	ret = msm_audio_effects_enable_extn(ac, msm_effects, true);
-	if (ret < 0)
-		pr_err("%s: Send msm audio effects extn params failed ret=%d\n",
-			__func__, ret);
+	/* Bass boost (range 0 - 1000) */
+	msm_effects->bass_boost.strength = 375;
+	if (curr_val != msm_effects->bass_boost.strength) {
+		param_hdr.module_id = AUDPROC_MODULE_ID_BASS_BOOST;
+		param_hdr.instance_id = INSTANCE_ID_0;
+		param_hdr.param_id = AUDPROC_PARAM_ID_BASS_BOOST_STRENGTH;
+		param_hdr.param_size = BASS_BOOST_STRENGTH_PARAM_SZ;
+		ret = q6asm_pack_and_set_pp_param_in_band(ac, param_hdr,
+							(u8 *) &msm_effects->bass_boost.strength);
+		if (ret < 0)
+			pr_err("%s: Send msm bass boost strength failed ret=%d\n",
+				__func__, ret);
+	}
+
+	curr_val = msm_effects->virtualizer.strength;
+
+	/* Virtualizer (range 0 - 1000) */
+	msm_effects->virtualizer.strength = 200;
+	if (curr_val != msm_effects->virtualizer.strength) {
+		param_hdr.module_id = AUDPROC_MODULE_ID_VIRTUALIZER;
+		param_hdr.instance_id = INSTANCE_ID_0;
+		param_hdr.param_id = AUDPROC_PARAM_ID_VIRTUALIZER_STRENGTH;
+		param_hdr.param_size = VIRTUALIZER_STRENGTH_PARAM_SZ;
+		ret = q6asm_pack_and_set_pp_param_in_band(ac, param_hdr,
+							(u8 *) &msm_effects->virtualizer.strength);
+		if (ret < 0)
+			pr_err("%s: Send msm virtualizer strength failed ret=%d\n",
+				__func__, ret);
+	}
+
+	/*
+	 * Experimental Values (open-source references cannot be found aside
+	 * from function and header definitions)
+	 * 
+	 * System counterpart:
+	 * https://android.googlesource.com/platform/hardware/qcom/audio/+/ebbb82365172337c6c250c6cac4e326970a9e351/post_proc/effect_api.c
+	 */
+
+	curr_val = msm_effects->bass_boost.mode;
+
+	/* Bass boost mode */
+	msm_effects->bass_boost.mode = 1;
+	if (curr_val != msm_effects->bass_boost.mode) {
+		param_hdr.module_id = AUDPROC_MODULE_ID_BASS_BOOST;
+		param_hdr.instance_id = INSTANCE_ID_0;
+		param_hdr.param_id = AUDPROC_PARAM_ID_BASS_BOOST_MODE;
+		param_hdr.param_size = BASS_BOOST_MODE_PARAM_SZ;
+		ret = q6asm_pack_and_set_pp_param_in_band(ac, param_hdr,
+							(u8 *) &msm_effects->bass_boost.mode);
+		if (ret < 0)
+			pr_err("%s: Send msm bass boost mode failed ret=%d\n",
+				__func__, ret);
+	}
+
+	curr_val = msm_effects->virtualizer.out_type;
+
+	/* Virtualizer out type */
+	msm_effects->virtualizer.out_type = 2;
+	if (curr_val != msm_effects->virtualizer.out_type) {
+		param_hdr.module_id = AUDPROC_MODULE_ID_VIRTUALIZER;
+		param_hdr.instance_id = INSTANCE_ID_0;
+		param_hdr.param_id = AUDPROC_PARAM_ID_VIRTUALIZER_OUT_TYPE;
+		param_hdr.param_size = VIRTUALIZER_OUT_TYPE_PARAM_SZ;
+		ret = q6asm_pack_and_set_pp_param_in_band(ac, param_hdr,
+							(u8 *) &msm_effects->virtualizer.out_type);
+		if (ret < 0)
+			pr_err("%s: Send msm virtualizer out type failed ret=%d\n",
+				__func__, ret);
+	}
+}
+
+static void msm_custom_audio_effects(struct q6audio_effects *effects)
+{
+	struct msm_nt_eff_all_config *msm_effects = &effects->audio_effects;
+	int val = 0, ret = 0;
+
+	if (!msm_effects->bass_boost.enable_flag)
+		msm_effects->bass_boost.enable_flag = !!++val;
+	if (!msm_effects->virtualizer.enable_flag)
+		msm_effects->virtualizer.enable_flag = !!++val;
+
+	if (val > 0) {
+		ret = msm_audio_effects_enable_extn(effects->ac, &effects->audio_effects, true);
+		if (ret < 0)
+			pr_err("%s: Send msm audio effects enable extn failed ret=%d\n",
+				__func__, ret);
+	}
+
+	/* Set custom effect values manually at init */
+	msm_audio_effects_set(effects);
 }
 
 static void audio_effects_init_pp(struct audio_client *ac)
 {
+	int ret = 0;
 	struct asm_softvolume_params softvol = {
 		.period = SOFT_VOLUME_PERIOD,
 		.step = SOFT_VOLUME_STEP,
 		.rampingcurve = SOFT_VOLUME_CURVE_LINEAR,
 	};
-	int ret = 0;
 
 	if (!ac) {
 		pr_err("%s: audio client null to init pp\n", __func__);
 		return;
 	}
-
 	ret = q6asm_set_softvolume_v2(ac, &softvol,
 				      SOFT_VOLUME_INSTANCE_1);
 	if (ret < 0)
@@ -152,7 +234,7 @@ static int audio_effects_shared_ioctl(struct file *file, unsigned cmd,
 					effects->config.meta_mode_enabled,
 					effects->config.output.bits_per_sample,
 					true /*overwrite topology*/,
-					ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER);
+					ASM_STREAM_POSTPROC_TOPO_ID_SA_PLUS);
 		if (rc < 0) {
 			pr_err("%s: Open failed for hw accelerated effects:rc=%d\n",
 				__func__, rc);
@@ -217,9 +299,7 @@ static int audio_effects_shared_ioctl(struct file *file, unsigned cmd,
 		}
 
 		audio_effects_init_pp(effects->ac);
-
-		/* Overwrite effect values */
-		msm_audio_effects_apply_extn(effects);
+		msm_custom_audio_effects(effects);
 
 		rc = q6asm_run(effects->ac, 0x00, 0x00, 0x00);
 		if (!rc)
@@ -277,8 +357,6 @@ static int audio_effects_shared_ioctl(struct file *file, unsigned cmd,
 				mutex_unlock(&effects->lock);
 				goto ioctl_fail;
 			}
-			/* Overwrite effect values */
-			msm_audio_effects_apply_extn(effects);
 			atomic_dec(&effects->out_count);
 		} else {
 			pr_err("%s: AUDIO_EFFECTS_WRITE: Buffer dropped\n",
@@ -432,6 +510,8 @@ static long audio_effects_set_pp_param(struct q6audio_effects *effects,
 		pr_err("%s: Invalid effects config module\n", __func__);
 		rc = -EINVAL;
 	}
+	/* Overwrite userspace values */
+	msm_custom_audio_effects(effects);
 	return rc;
 }
 

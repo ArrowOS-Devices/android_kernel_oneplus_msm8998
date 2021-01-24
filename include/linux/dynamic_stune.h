@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Dynamic Schedtune Driver
- * Copyright (C) 2020 Edrick Vince Sinsuan <sedrickvince@gmail.com>.
+ * Copyright (C) 2021 Edrick Vince Sinsuan <sedrickvince@gmail.com>.
  */
 
 #ifndef _DYNAMIC_STUNE_H_
@@ -11,7 +11,6 @@
 
 enum dstune_struct {
 	FB,
-	TOPCG,
 	INPUT,
 	DT_MAX
 };
@@ -25,6 +24,6 @@ extern struct dstune dss[];
 
 #define dynstune_read_state(_dsnum) atomic_read(&dss[_dsnum].state)
 #define dynstune_acquire_update(_dsnum) \
-			!atomic_cmpxchg_acquire(&dss[_dsnum].update, 0, 1)
+			atomic_cmpxchg_acquire(&dss[_dsnum].update, 0, 1)
 #define dynstune_wake(_dsnum) wake_up(&dss[_dsnum].waitq)
 #endif /* _DYNAMIC_STUNE_H_ */
