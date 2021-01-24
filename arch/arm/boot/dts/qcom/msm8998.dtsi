@@ -34,7 +34,7 @@
 
 	chosen {
 		stdout-path = "serial0";
-		bootargs = "noirqdebug";
+		bootargs = "noirqdebug rcupdate.rcu_expedited=1";
 	};
 
 	cpus {
@@ -1386,6 +1386,7 @@
 
 	qcom,msm_fastrpc {
 		compatible = "qcom,msm-fastrpc-adsp";
+		qcom,secure-domains = <0x0>;
 		qcom,fastrpc-glink;
 
 		qcom,msm_fastrpc_cpz_cb1 {

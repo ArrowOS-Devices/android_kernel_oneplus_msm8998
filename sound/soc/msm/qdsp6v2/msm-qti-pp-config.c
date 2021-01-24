@@ -688,7 +688,7 @@ static void msm_qti_pp_asphere_init_state(void)
 		asphere_state.copp_idx[i] = -1;
 	}
 	asphere_state.enabled = 1;
-	asphere_state.strength = 500;
+	asphere_state.strength = 600;
 	asphere_state.mode = 2;
 	asphere_state.version = 0;
 	asphere_state.enabled_prev = 0;
@@ -852,9 +852,7 @@ static int msm_qti_pp_asphere_get(struct snd_kcontrol *kcontrol,
 static int msm_qti_pp_asphere_set(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	/* Only init and set default values */
-	msm_qti_pp_asphere_init_state();
-	pr_debug("%s, enable %u, strength %u, mode %u\n", __func__,
+	pr_debug("%s, read-only values: enable %u, strength %u, mode %u\n", __func__,
 		asphere_state.enabled, asphere_state.strength, asphere_state.mode);
 	return 0;
 }

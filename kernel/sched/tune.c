@@ -149,7 +149,8 @@ struct schedtune {
 	 * towards idle CPUs */
 	int prefer_idle;
 
-	/* Task will be scheduled on the CPU with the highest spare capacity */
+	/* Allow prefer idle to occur in !prefer_idle SchedTune CGroup but 
+	 * only for zygote tasks */
 	int crucial;
 };
 
@@ -573,6 +574,10 @@ int schedtune_task_boost(struct task_struct *p)
 	if (unlikely(!schedtune_initialized))
 		return 0;
 
+	/* Do not tune tasks in iowait */
+	if (unlikely(p->in_iowait))
+		return 0;
+
 	/* Get task boost value */
 	rcu_read_lock();
 	st = task_schedtune(p);
@@ -590,10 +595,14 @@ int schedtune_boost_bias(struct task_struct *p)
 	if (unlikely(!schedtune_initialized))
 		return 0;
 
+	/* Do not tune tasks in iowait */
+	if (unlikely(p->in_iowait))
+		return 0;
+
 	/* Get boost_bias value */
 	rcu_read_lock();
 	st = task_schedtune(p);
-	boost_bias = st->boost > 0 ?: st->boost_bias;
+	boost_bias = st->boost > 0 ? 1 : st->boost_bias;
 	rcu_read_unlock();
 
 	return boost_bias;
@@ -608,6 +617,10 @@ int schedtune_boost_bias_rcu_locked(struct task_struct *p)
 	int boost_bias;
 
 	if (unlikely(!schedtune_initialized))
+		return 0;
+
+	/* Do not tune tasks in iowait */
+	if (unlikely(p->in_iowait))
 		return 0;
 
 	/* Get boost_bias value */
@@ -625,30 +638,19 @@ int schedtune_prefer_idle(struct task_struct *p)
 	if (unlikely(!schedtune_initialized))
 		return 0;
 
+	/* Do not tune tasks in iowait */
+	if (unlikely(p->in_iowait))
+		return 0;
+
 	/* Get prefer_idle value */
 	rcu_read_lock();
 	st = task_schedtune(p);
 	prefer_idle = st->prefer_idle;
+	if (!prefer_idle && st->crucial)
+		prefer_idle = task_is_zygote(p);
 	rcu_read_unlock();
 
 	return prefer_idle;
-}
-
-int schedtune_crucial(struct task_struct *p)
-{
-	struct schedtune *st;
-	int crucial;
-
-	if (unlikely(!schedtune_initialized))
-		return 0;
-
-	/* Get crucial value */
-	rcu_read_lock();
-	st = task_schedtune(p);
-	crucial = st->crucial;
-	rcu_read_unlock();
-
-	return crucial;
 }
 
 static u64
@@ -692,7 +694,7 @@ crucial_read(struct cgroup_subsys_state *css, struct cftype *cft)
 {
 	struct schedtune *st = css_st(css);
 
-	return st->crucial;
+	return st->crucial || st->prefer_idle;
 }
 
 static int
@@ -923,6 +925,8 @@ static void write_default_values(struct cgroup_subsys_state *css)
 		struct st_data tgt = st_targets[i];
 
 		if (!strcmp(css->cgroup->kn->name, tgt.name)) {
+			struct schedtune *st = css_st(css);
+
 			pr_info("stune_assist: setting values for %s: boost=%d boost_bias=%d prefer_idle=%d crucial=%d\n", 
 				tgt.name, tgt.boost, tgt.boost_bias, tgt.prefer_idle, tgt.crucial);
 
@@ -934,9 +938,9 @@ static void write_default_values(struct cgroup_subsys_state *css)
 #else 
 			boost_write(css, NULL, tgt.boost);
 #endif/* CONFIG_DYNAMIC_STUNE */
-			boost_bias_write(css, NULL, tgt.boost_bias);
-			prefer_idle_write(css, NULL, tgt.prefer_idle);
-			crucial_write(css, NULL, tgt.crucial);
+			st->boost_bias = tgt.boost_bias;
+			st->prefer_idle = tgt.prefer_idle;
+			st->crucial = tgt.crucial;
 		}
 	}
 }
@@ -1077,35 +1081,51 @@ static void set_fb(u64 time)
 	}
 
 	st = stune_get_by_name("top-app");
-	if (unlikely(!st))
-		return;
+	if (likely(st)) {
+		/*
+		 * Enable boost to make sugov prefer higher freqs and encourage
+		 * scheduler to move top-app tasks to big cluster.
+		 */
+		if (state)
+			boost = st->dynamic_boost;
 
-	if (state) {
-		boost = st->dynamic_boost;
+		if (boost != st->boost)
+			boost_write(&st->css, NULL, boost);
 
-		/* Set active limits if state is true */
-		sugov_flags |= SUGOV_LIMIT_ACTIVE;
+		/* 
+		 * Enable bias to retain fair conditions for top-app tasks for cases 
+		 * that the dynamic boost is set to 0.
+		 */
+		st->boost_bias = state;
+
+		/*
+		 * Enable prefer_idle in order to bias migrating top-app tasks
+		 * to idle cores along with boost bias to favor high capacity cpus.
+		 */
+		st->prefer_idle = state;
 	}
 
-	/*
-	 * Enable boost to make sugov prefer higher freqs and encourage
-	 * scheduler to move top-app tasks to big cluster.
-	 */
-	if (boost != st->boost)
-		boost_write(&st->css, NULL, boost);
-
-	/*
-	 * Enable prefer_idle in order to bias migrating top-app
-	 * tasks to idle cores. Also enable bias for foreground
-	 * to help with jitter reduction.
-	 */
-	prefer_idle_write(&st->css, NULL, state);
-
 	st = stune_get_by_name("foreground");
-	if (unlikely(!st))
-		return;
+	if (likely(st)) {
+		/*
+		 * Enable bias for foreground to also encourage fg task migration 
+		 * to big cluster without artificially increasing utilization of
+		 * tasks within the cgroup.
+		 */
+		st->boost_bias = state;
 
-	boost_bias_write(&st->css, NULL, state);
+		/*
+		 * Enable crucial in order to bias migrating foreground tasks
+		 * to idle cores without foreground cgroup competing with top-app 
+		 * for idle cpus during normal operations by making the bias
+		 * exclusive for zygote tasks only.
+		 */
+		st->crucial = state;
+	}
+
+	/* Set active limits if state is true */
+	if (state)
+		sugov_flags |= SUGOV_LIMIT_ACTIVE;
 
 	for_each_possible_cpu(cpu) {
 		struct rq *rq = cpu_rq(cpu);
@@ -1127,33 +1147,6 @@ static void set_fb(u64 time)
 }
 
 /*
- * Top-app cgroup function
- */
-static void set_fork(u64 time)
-{
-	struct schedtune *st;
-	bool state = !!time;
-
-	/* Consider fork requests as input */
-	if (state && dynstune_acquire_update(INPUT))
-		dynstune_wake(INPUT);
-
-	if (!dynstune_set_state(FORK, state))
-		return;
-
-	st = stune_get_by_name("top-app");
-	if (unlikely(!st))
-		return;
-
-	/*
-	 * Use idle cpus with the highest original capacity for top-app when it
-	 * comes to app launches and transitions in order to speed up
-	 * the process and efficiently consume power.
-	 */
-	crucial_write(&st->css, NULL, state);
-}
-
-/*
  * Input function
  */
 static void set_input(u64 time)
@@ -1166,13 +1159,10 @@ static void set_input(u64 time)
 		 * it's under infinite timeout.
 		 */
 		if (likely(state) && !dynstune_read_state(FB) && 
-			dynstune_read_update(FB))
+				dynstune_read_update(FB))
 			dynstune_wake(FB);
-		return;
-	}
-
-	/* Wake framebuffer dstune if initially woken up */
-	if (state) {
+	} else if (state) {
+		/* Wake framebuffer structure if initially woken up */
 		dynstune_acquire_update(FB);
 		dynstune_wake(FB);
 	}
@@ -1213,7 +1203,6 @@ static int dynamic_stune_init(void)
 
 	static struct dstune_priv dsp_init[] = {
 		{ "dstune_fb", NULL, CONFIG_FB_STUNE_DURATION, &set_fb },
-		{ "dstune_fork", NULL, CONFIG_FORK_STUNE_DURATION, &set_fork },
 		{ "dstune_input", NULL, CONFIG_INPUT_STUNE_DURATION, &set_input }
 	};
 
