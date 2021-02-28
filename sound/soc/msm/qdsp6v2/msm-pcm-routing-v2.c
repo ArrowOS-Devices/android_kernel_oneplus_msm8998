@@ -81,7 +81,7 @@ static int msm_ec_ref_sampling_rate = 5;
 static uint32_t voc_session_id = ALL_SESSION_VSID;
 static int msm_route_ext_ec_ref;
 static bool is_custom_stereo_on;
-static bool is_ds2_on = true;
+static bool is_ds2_on;
 static bool swap_ch;
 static int msm_native_mode = 3;
 
@@ -221,16 +221,17 @@ static void msm_pcm_routing_cfg_pp(int port_id, int copp_idx, int topology,
 					__func__, topology, port_id, rc);
 		}
 		break;
+	case ADM_CMD_COPP_OPEN_TOPOLOGY_ID_AUDIOSPHERE:
+		pr_debug("%s: TOPOLOGY_ID_AUDIOSPHERE\n", __func__);
+		rc = msm_qti_pp_asphere_init(port_id, copp_idx);
+		if (rc < 0)
+			pr_err("%s: topo_id 0x%x, port %d, copp %d, rc %d\n",
+				__func__, topology, port_id, copp_idx, rc);
+		break;
 	default:
 		/* custom topology specific feature param handlers */
 		break;
 	}
-	/* Allow ASphere to initialize regardless of topology */
-	pr_debug("%s: TOPOLOGY_ID_AUDIOSPHERE\n", __func__);
-	rc = msm_qti_pp_asphere_init(port_id, copp_idx);
-	if (rc < 0)
-		pr_err("%s: topo_id 0x%x, port %d, copp %d, rc %d\n",
-			__func__, topology, port_id, copp_idx, rc);
 }
 
 static void msm_pcm_routing_deinit_pp(int port_id, int topology)
@@ -254,13 +255,14 @@ static void msm_pcm_routing_deinit_pp(int port_id, int topology)
 			msm_dolby_dap_deinit(port_id);
 		}
 		break;
+	case ADM_CMD_COPP_OPEN_TOPOLOGY_ID_AUDIOSPHERE:
+		pr_debug("%s: TOPOLOGY_ID_AUDIOSPHERE\n", __func__);
+		msm_qti_pp_asphere_deinit(port_id);
+		break;
 	default:
 		/* custom topology specific feature deinit handlers */
 		break;
 	}
-	/* Deinit as well along with other topologies */
-	pr_debug("%s: TOPOLOGY_ID_AUDIOSPHERE\n", __func__);
-	msm_qti_pp_asphere_deinit(port_id);
 }
 
 static void msm_pcm_routng_cfg_matrix_map_pp(struct route_payload payload,

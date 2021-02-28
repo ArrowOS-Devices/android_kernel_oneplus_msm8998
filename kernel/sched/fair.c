@@ -89,7 +89,7 @@ static unsigned int sched_nr_latency = 8;
  * After fork, child runs first. If set to 0 (default) then
  * parent will (try to) run first.
  */
-static unsigned int sched_child_runs_first = 1;
+unsigned int sysctl_sched_child_runs_first __read_mostly;
 
 /*
  * To enable/disable energy aware feature.
@@ -4163,10 +4163,8 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	}
 	/*
 	 * don't let the period tick interfere with the hrtick preemption
-	 * unless timekeeping_suspended is true in which period tick should
-	 * take over.
 	 */
-	if (!sched_feat(DOUBLE_TICK) && !timekeeping_suspended &&
+	if (!sched_feat(DOUBLE_TICK) &&
 			hrtimer_active(&rq_of(cfs_rq)->hrtick_timer))
 		return;
 #endif
@@ -5049,6 +5047,8 @@ unsigned long boosted_cpu_util(int cpu);
 #define boosted_cpu_util(cpu) cpu_util_freq(cpu)
 #endif
 
+static inline bool task_is_boosted(struct task_struct *p);
+
 static unsigned long cpu_util_without(int cpu, struct task_struct *p);
 static inline unsigned long cpu_util_freq(int cpu);
 
@@ -5091,6 +5091,14 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	 * also for throttled RQs.
 	 */
 	schedtune_enqueue_task(p, cpu_of(rq));
+
+	/*
+	 * If in_iowait is set, the code below may not trigger any cpufreq
+	 * utilization updates, so do it here explicitly with the IOWAIT flag
+	 * passed. Only call the update if the task is boosted.
+	 */
+	if (p->in_iowait && task_is_boosted(p))
+		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
 	for_each_sched_entity(se) {
 		if (se->on_rq)
@@ -6101,7 +6109,6 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 }
 
 static inline unsigned long boosted_task_util(struct task_struct *task);
-static inline bool task_is_boosted(struct task_struct *p);
 
 static inline bool __task_fits(struct task_struct *p, int cpu, int util)
 {
@@ -6117,10 +6124,6 @@ static inline bool task_fits_cap(struct task_struct *p, int cpu)
 	unsigned long capacity = capacity_orig_of(cpu);
 	unsigned long max_capacity = cpu_rq(cpu)->rd->max_cpu_capacity.val;
 	int min_cpu = cpu_rq(cpu)->rd->min_cap_orig_cpu;
-
-	/* Do not allow iowait tasks to occupy perf cluster */
-	if (unlikely(p->in_iowait) && cpumask_test_cpu(cpu, cpu_perf_mask))
-		return false;
 
 	if (capacity == max_capacity)
 		return true;
@@ -7324,8 +7327,7 @@ static int select_energy_cpu_brute(struct task_struct *p, int prev_cpu,
 
 	sd = rcu_dereference(per_cpu(sd_ea, prev_cpu));
 	/* Find a cpu with sufficient capacity */
-	tmp_target = find_best_target(p, &tmp_backup,
-					boosted || sync_boost, prefer_idle);
+	tmp_target = find_best_target(p, &tmp_backup, boosted || sync_boost, prefer_idle);
 
 	if (!sd)
 		goto unlock;
@@ -11059,7 +11061,7 @@ static void task_fork_fair(struct task_struct *p)
 	}
 	place_entity(cfs_rq, se, 1);
 
-	if (sched_child_runs_first && curr && entity_before(curr, se)) {
+	if (sysctl_sched_child_runs_first && curr && entity_before(curr, se)) {
 		/*
 		 * Upon rescheduling, sched_class::put_prev_task() will place
 		 * 'current' within the tree based on its new key value.

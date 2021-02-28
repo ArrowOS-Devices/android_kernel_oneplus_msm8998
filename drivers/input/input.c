@@ -27,9 +27,6 @@
 #include <linux/device.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
-#ifdef CONFIG_DYNAMIC_STUNE
-#include <linux/dynamic_stune.h>
-#endif /* CONFIG_DYNAMIC_STUNE */
 #include "input-compat.h"
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
@@ -317,10 +314,6 @@ static int input_get_disposition(struct input_dev *dev,
 	case EV_ABS:
 		if (is_event_supported(code, dev->absbit, ABS_MAX))
 			disposition = input_handle_abs_event(dev, code, &value);
-#ifdef CONFIG_DYNAMIC_STUNE
-		if (disposition != INPUT_IGNORE_EVENT && !dynstune_acquire_update(INPUT))
-			dynstune_wake(INPUT);
-#endif /* CONFIG_DYNAMIC_STUNE */
 
 		break;
 
