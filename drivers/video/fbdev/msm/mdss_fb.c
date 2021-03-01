@@ -49,6 +49,10 @@
 #include <sync.h>
 #include <sw_sync.h>
 
+#ifdef CONFIG_DYNAMIC_STUNE
+#include <linux/dynamic_stune.h>
+#endif
+
 #include "mdss_fb.h"
 #include "mdss_mdp_splash_logo.h"
 #define CREATE_TRACE_POINTS
@@ -63,10 +67,6 @@
 #ifdef CONFIG_KLAPSE
 #include <linux/klapse.h>
 #endif
-
-#ifdef CONFIG_DYNAMIC_STUNE
-#include <linux/dynamic_stune.h>
-#endif /* CONFIG_DYNAMIC_STUNE */
 
 #ifdef CONFIG_FB_MSM_TRIPLE_BUFFER
 #define MDSS_FB_NUM 3
@@ -3786,6 +3786,10 @@ int mdss_fb_atomic_commit(struct fb_info *info,
 		goto end;
 	}
 
+#ifdef CONFIG_DYNAMIC_STUNE
+	dynstune_acquire_update();
+#endif
+
 	commit_v1 = &commit->commit_v1;
 	if (commit_v1->flags & MDP_VALIDATE_LAYER) {
 		ret = mdss_fb_wait_for_kickoff(mfd);
@@ -5413,10 +5417,6 @@ int mdss_fb_do_ioctl(struct fb_info *info, unsigned int cmd,
 		ret = mdss_fb_mode_switch(mfd, dsi_mode);
 		break;
 	case MSMFB_ATOMIC_COMMIT:
-#ifdef CONFIG_DYNAMIC_STUNE
-		if (dynstune_read_state(INPUT))
-			dynstune_acquire_update(FB);
-#endif /* CONFIG_DYNAMIC_STUNE */
 		ret = mdss_fb_atomic_commit_ioctl(info, argp, file);
 		break;
 

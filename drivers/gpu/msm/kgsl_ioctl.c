@@ -21,7 +21,7 @@
 
 #ifdef CONFIG_DYNAMIC_STUNE
 #include <linux/dynamic_stune.h>
-#endif /* CONFIG_DYNAMIC_STUNE */
+#endif
 
 static const struct kgsl_ioctl kgsl_ioctl_funcs[] = {
 	KGSL_IOCTL_FUNC(IOCTL_KGSL_DEVICE_GETPROPERTY,
@@ -174,11 +174,13 @@ long kgsl_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 	long ret;
 
 	if (cmd == IOCTL_KGSL_GPU_COMMAND &&
-#ifdef CONFIG_DYNAMIC_STUNE
-		dynstune_read_state(INPUT) &&
-#endif /* CONFIG_DYNAMIC_STUNE */
-		READ_ONCE(device->state) != KGSL_STATE_ACTIVE)
+	    READ_ONCE(device->state) != KGSL_STATE_ACTIVE)
 		kgsl_schedule_work(KGSL_PERF, &adreno_dev->pwr_on_work);
+
+#ifdef CONFIG_DYNAMIC_STUNE
+	if (cmd == IOCTL_KGSL_GPU_COMMAND)
+		dynstune_acquire_update();
+#endif
 
 	ret = kgsl_ioctl_helper(filep, cmd, arg, kgsl_ioctl_funcs,
 		ARRAY_SIZE(kgsl_ioctl_funcs));
