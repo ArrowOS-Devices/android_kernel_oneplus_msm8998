@@ -107,7 +107,7 @@ unsigned int __read_mostly sysctl_sched_energy_aware = 1;
 unsigned int sysctl_sched_wakeup_granularity = 1000000UL;
 unsigned int normalized_sysctl_sched_wakeup_granularity = 1000000UL;
 
-unsigned int __read_mostly sysctl_sched_migration_cost = 500000UL;
+unsigned int __read_mostly sysctl_sched_migration_cost = 1000000UL;
 
 /*
  * The exponential sliding  window over which load is averaged for shares
@@ -5047,8 +5047,6 @@ unsigned long boosted_cpu_util(int cpu);
 #define boosted_cpu_util(cpu) cpu_util_freq(cpu)
 #endif
 
-static inline bool task_is_boosted(struct task_struct *p);
-
 static unsigned long cpu_util_without(int cpu, struct task_struct *p);
 static inline unsigned long cpu_util_freq(int cpu);
 
@@ -5091,14 +5089,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	 * also for throttled RQs.
 	 */
 	schedtune_enqueue_task(p, cpu_of(rq));
-
-	/*
-	 * If in_iowait is set, the code below may not trigger any cpufreq
-	 * utilization updates, so do it here explicitly with the IOWAIT flag
-	 * passed. Only call the update if the task is boosted.
-	 */
-	if (p->in_iowait && task_is_boosted(p))
-		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
 	for_each_sched_entity(se) {
 		if (se->on_rq)
@@ -6119,17 +6109,13 @@ static inline bool __task_fits(struct task_struct *p, int cpu, int util)
 	return (capacity * 1024) > (util * capacity_margin);
 }
 
-static inline bool task_fits_cap(struct task_struct *p, int cpu)
+static inline bool task_fits_max(struct task_struct *p, int cpu)
 {
 	unsigned long capacity = capacity_orig_of(cpu);
 	unsigned long max_capacity = cpu_rq(cpu)->rd->max_cpu_capacity.val;
-	int min_cpu = cpu_rq(cpu)->rd->min_cap_orig_cpu;
 
 	if (capacity == max_capacity)
 		return true;
-
-	if (cpu == min_cpu && task_is_boosted(p))
-		return false;
 
 	return __task_fits(p, cpu, 0);
 }
@@ -7574,7 +7560,7 @@ static void task_dead_fair(struct task_struct *p)
 	remove_entity_load_avg(&p->se);
 }
 #else
-#define task_fits_cap(p, cpu) true
+#define task_fits_max(p, cpu) true
 #endif /* CONFIG_SMP */
 
 static unsigned long
@@ -7849,7 +7835,7 @@ done: __maybe_unused;
 	if (hrtick_enabled(rq))
 		hrtick_start_fair(rq, p);
 
-	rq->misfit_task = !task_fits_cap(p, rq->cpu);
+	rq->misfit_task = !task_fits_max(p, rq->cpu);
 
 	return p;
 
@@ -8237,12 +8223,6 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 
 		return 0;
 	}
-
-	/* Don't allow biased tasks to be migrated to lp cores */
-	if (cpumask_test_cpu(env->src_cpu, cpu_perf_mask) && 
-		cpumask_test_cpu(env->dst_cpu, cpu_lp_mask) && 
-		task_is_boosted(p))
-		return 0;
 
 	/* Record that we found atleast one task that could run on dst_cpu */
 	env->flags &= ~LBF_ALL_PINNED;
@@ -11033,7 +11013,7 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		trace_sched_overutilized(true);
 	}
 
-	rq->misfit_task = !task_fits_cap(curr, rq->cpu);
+	rq->misfit_task = !task_fits_max(curr, rq->cpu);
 #endif
 
 }

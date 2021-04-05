@@ -504,9 +504,6 @@ void hrtick_start(struct rq *rq, u64 delay)
 	ktime_t time;
 	s64 delta;
 
-	if (timekeeping_suspended)
-		return;
-
 	/*
 	 * Don't schedule slices shorter than 10000ns, that just
 	 * doesn't make sense and can cause timer DoS.
@@ -579,7 +576,7 @@ static void init_rq_hrtick(struct rq *rq)
 	rq->hrtick_csd.info = rq;
 #endif
 
-	hrtimer_init(&rq->hrtick_timer, CLOCK_BOOTTIME, HRTIMER_MODE_REL);
+	hrtimer_init(&rq->hrtick_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	rq->hrtick_timer.function = hrtick;
 }
 #else	/* CONFIG_SCHED_HRTICK */
@@ -4136,7 +4133,8 @@ static void __setscheduler_params(struct task_struct *p,
 	if (policy == SETPARAM_POLICY)
 		policy = p->policy;
 
-	p->policy = policy;
+	/* Replace SCHED_FIFO with SCHED_RR to reduce latency */
+	p->policy = policy == SCHED_FIFO ? SCHED_RR : policy;
 
 	if (dl_policy(policy))
 		__setparam_dl(p, attr);

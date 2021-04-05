@@ -2925,10 +2925,16 @@ int adm_open(int port_id, int path, int rate, int channel_mode, int topology,
 			topology = NULL_COPP_TOPOLOGY;
 	} else {
 		if ((path == ADM_PATH_COMPRESSED_RX) ||
-		    (path == ADM_PATH_COMPRESSED_TX))
+		    (path == ADM_PATH_COMPRESSED_TX)) {
 			flags = 0;
-		else
+		} else {
 			flags = ADM_LEGACY_DEVICE_SESSION;
+			if ((topology == DEFAULT_COPP_TOPOLOGY) ||
+				(topology == DOLBY_ADM_COPP_TOPOLOGY_ID) ||
+				(topology == DS2_ADM_COPP_TOPOLOGY_ID) ||
+				(topology == SRS_TRUMEDIA_TOPOLOGY_ID))
+				topology = NULL_COPP_TOPOLOGY;
+		}
 	}
 
 	if ((topology == VPM_TX_SM_ECNS_COPP_TOPOLOGY) ||

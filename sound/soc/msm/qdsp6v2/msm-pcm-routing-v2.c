@@ -58,7 +58,7 @@
 #define DS2_ADM_COPP_TOPOLOGY_ID 0xFFFFFFFF
 #endif
 
-static struct mutex routing_lock;
+static struct mutex routing_lock, adm_lock;
 
 static struct cal_type_data *cal_data;
 
@@ -77,13 +77,14 @@ static int slim0_rx_aanc_fb_port;
 static int msm_route_ec_ref_rx;
 static int msm_ec_ref_ch = 4;
 static int msm_ec_ref_bit_format = SNDRV_PCM_FORMAT_S16_LE;
-static int msm_ec_ref_sampling_rate = 5;
+static int msm_ec_ref_sampling_rate = 48000;
 static uint32_t voc_session_id = ALL_SESSION_VSID;
 static int msm_route_ext_ec_ref;
 static bool is_custom_stereo_on;
 static bool is_ds2_on;
 static bool swap_ch;
 static int msm_native_mode = 3;
+static bool msm_adm_override = 0;
 
 #define WEIGHT_0_DB 0x4000
 /* all the FEs which can support channel mixer */
@@ -3572,20 +3573,26 @@ static const struct snd_kcontrol_new channel_mixer_controls[] = {
 static int msm_native_mode_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	switch (msm_native_mode) {
-	case 3:
-	case 2:
-	case 1:
-		ucontrol->value.integer.value[0] = msm_native_mode;
-		break;
-	default:
-		ucontrol->value.integer.value[0] = 0;
-		break;
+	mutex_lock(&adm_lock);
+	if (!msm_adm_override) {
+		switch (msm_native_mode) {
+		case 3:
+		case 2:
+		case 1:
+			ucontrol->value.integer.value[0] = msm_native_mode;
+			break;
+		default:
+			ucontrol->value.integer.value[0] = 0;
+			break;
+		}
+	} else {
+		ucontrol->value.integer.value[0] = 3;
 	}
 
 	pr_debug("%s: msm_native_mode = %d ucontrol value %ld\n",
 		__func__, msm_native_mode,
 		ucontrol->value.integer.value[0]);
+	mutex_unlock(&adm_lock);
 	return 0;
 }
 
@@ -3597,6 +3604,7 @@ static int msm_native_mode_put(struct snd_kcontrol *kcontrol,
 	 * 2 << 11: use channel native mode
 	 * 3 << 11: use bit width and channel native mode
 	*/
+	mutex_lock(&adm_lock);
 	switch (ucontrol->value.integer.value[0]) {
 	case 3:
 	case 2:
@@ -3611,7 +3619,9 @@ static int msm_native_mode_put(struct snd_kcontrol *kcontrol,
 	pr_debug("%s: msm_native_mode = %d ucontrol value %ld\n",
 		__func__, msm_native_mode,
 		ucontrol->value.integer.value[0]);
-	adm_set_native_mode(msm_native_mode);
+	if (!msm_adm_override)
+		adm_set_native_mode(msm_native_mode);
+	mutex_unlock(&adm_lock);
 	return 0;
 }
 
@@ -3630,7 +3640,9 @@ static const struct snd_kcontrol_new native_mode_controls[] = {
 static int msm_ec_ref_ch_get(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = msm_ec_ref_ch;
+	mutex_lock(&adm_lock);
+	ucontrol->value.integer.value[0] = msm_adm_override ? 32 : msm_ec_ref_ch;
+	mutex_unlock(&adm_lock);
 	pr_debug("%s: msm_ec_ref_ch = %ld\n", __func__,
 		ucontrol->value.integer.value[0]);
 	return 0;
@@ -3639,9 +3651,12 @@ static int msm_ec_ref_ch_get(struct snd_kcontrol *kcontrol,
 static int msm_ec_ref_ch_put(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
+	mutex_lock(&adm_lock);
 	msm_ec_ref_ch = ucontrol->value.integer.value[0];
 	pr_debug("%s: msm_ec_ref_ch = %d\n", __func__, msm_ec_ref_ch);
-	adm_num_ec_ref_rx_chans(msm_ec_ref_ch);
+	if (!msm_adm_override)
+		adm_num_ec_ref_rx_chans(msm_ec_ref_ch);
+	mutex_unlock(&adm_lock);
 	return 0;
 }
 
@@ -3651,17 +3666,23 @@ static const char *const ec_ref_ch_text[] = {"Zero", "One", "Two", "Three",
 static int msm_ec_ref_bit_format_get(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	switch (msm_ec_ref_bit_format) {
-	case SNDRV_PCM_FORMAT_S24_LE:
+	mutex_lock(&adm_lock);
+	if (!msm_adm_override) {
+		switch (msm_ec_ref_bit_format) {
+		case SNDRV_PCM_FORMAT_S24_LE:
+			ucontrol->value.integer.value[0] = 2;
+			break;
+		case SNDRV_PCM_FORMAT_S16_LE:
+			ucontrol->value.integer.value[0] = 1;
+			break;
+		default:
+			ucontrol->value.integer.value[0] = 0;
+			break;
+		}
+	} else {
 		ucontrol->value.integer.value[0] = 2;
-		break;
-	case SNDRV_PCM_FORMAT_S16_LE:
-		ucontrol->value.integer.value[0] = 1;
-		break;
-	default:
-		ucontrol->value.integer.value[0] = 0;
-		break;
 	}
+	mutex_unlock(&adm_lock);
 	pr_debug("%s: msm_ec_ref_bit_format = %ld\n",
 		 __func__, ucontrol->value.integer.value[0]);
 	return 0;
@@ -3670,8 +3691,7 @@ static int msm_ec_ref_bit_format_get(struct snd_kcontrol *kcontrol,
 static int msm_ec_ref_bit_format_put(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	u16 bit_width = 0;
-
+	mutex_lock(&adm_lock);
 	switch (ucontrol->value.integer.value[0]) {
 	case 2:
 		msm_ec_ref_bit_format = SNDRV_PCM_FORMAT_S24_LE;
@@ -3684,14 +3704,20 @@ static int msm_ec_ref_bit_format_put(struct snd_kcontrol *kcontrol,
 		break;
 	}
 
-	if (msm_ec_ref_bit_format == SNDRV_PCM_FORMAT_S16_LE)
-		bit_width = 16;
-	else if (msm_ec_ref_bit_format == SNDRV_PCM_FORMAT_S24_LE)
-		bit_width = 24;
-
 	pr_debug("%s: msm_ec_ref_bit_format = %d\n",
 		 __func__, msm_ec_ref_bit_format);
-	adm_ec_ref_rx_bit_width(bit_width);
+
+	if (!msm_adm_override) {
+		u16 bit_width = 0;
+
+		if (msm_ec_ref_bit_format == SNDRV_PCM_FORMAT_S16_LE)
+			bit_width = 16;
+		else if (msm_ec_ref_bit_format == SNDRV_PCM_FORMAT_S24_LE)
+			bit_width = 24;
+
+		adm_ec_ref_rx_bit_width(bit_width);
+	}
+	mutex_unlock(&adm_lock);
 	return 0;
 }
 
@@ -3700,7 +3726,9 @@ static char const *ec_ref_bit_format_text[] = {"0", "S16_LE", "S24_LE"};
 static int msm_ec_ref_rate_get(struct snd_kcontrol *kcontrol,
 				      struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = msm_ec_ref_sampling_rate;
+	mutex_lock(&adm_lock);
+	ucontrol->value.integer.value[0] = msm_adm_override ? 384000 : msm_ec_ref_sampling_rate;
+	mutex_unlock(&adm_lock);
 	pr_debug("%s: msm_ec_ref_sampling_rate = %ld\n",
 		 __func__, ucontrol->value.integer.value[0]);
 	return 0;
@@ -3709,6 +3737,7 @@ static int msm_ec_ref_rate_get(struct snd_kcontrol *kcontrol,
 static int msm_ec_ref_rate_put(struct snd_kcontrol *kcontrol,
 				      struct snd_ctl_elem_value *ucontrol)
 {
+	mutex_lock(&adm_lock);
 	switch (ucontrol->value.integer.value[0]) {
 	case 0:
 		msm_ec_ref_sampling_rate = 0;
@@ -3743,7 +3772,9 @@ static int msm_ec_ref_rate_put(struct snd_kcontrol *kcontrol,
 	}
 	pr_debug("%s: msm_ec_ref_sampling_rate = %d\n",
 		 __func__, msm_ec_ref_sampling_rate);
-	adm_ec_ref_rx_sampling_rate(msm_ec_ref_sampling_rate);
+	if (!msm_adm_override)
+		adm_ec_ref_rx_sampling_rate(msm_ec_ref_sampling_rate);
+	mutex_unlock(&adm_lock);
 	return 0;
 }
 
@@ -3768,8 +3799,8 @@ static const struct snd_kcontrol_new ec_ref_param_controls[] = {
 static int msm_routing_ec_ref_rx_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	pr_debug("%s: ec_ref_rx  = %d", __func__, msm_route_ec_ref_rx);
 	mutex_lock(&routing_lock);
+	pr_debug("%s: ec_ref_rx  = %d", __func__, msm_route_ec_ref_rx);
 	ucontrol->value.integer.value[0] = msm_route_ec_ref_rx;
 	mutex_unlock(&routing_lock);
 	return 0;
@@ -3778,7 +3809,7 @@ static int msm_routing_ec_ref_rx_get(struct snd_kcontrol *kcontrol,
 static int msm_routing_ec_ref_rx_put(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	int ec_ref_port_id;
+	int ec_ref_port_id, override;
 	struct snd_soc_dapm_widget_list *wlist =
 					dapm_kcontrol_get_wlist(kcontrol);
 	struct snd_soc_dapm_widget *widget = wlist->widgets[0];
@@ -3923,12 +3954,40 @@ static int msm_routing_ec_ref_rx_put(struct snd_kcontrol *kcontrol,
 		ec_ref_port_id = AFE_PORT_INVALID;
 		break;
 	}
+
+	/* Override values for RX ports */
+	mutex_lock(&adm_lock);
+	override = !(ec_ref_port_id % 2);
+	if (override != msm_adm_override) {
+		u16 bit_width = 0;
+
+		if (override) {
+			msm_native_mode = 3;
+			msm_ec_ref_ch = 32;
+			msm_ec_ref_sampling_rate = 384000;
+			msm_ec_ref_bit_format = SNDRV_PCM_FORMAT_S24_LE;
+		}
+
+		if (msm_ec_ref_bit_format == SNDRV_PCM_FORMAT_S16_LE)
+			bit_width = 16;
+		else if (msm_ec_ref_bit_format == SNDRV_PCM_FORMAT_S24_LE)
+			bit_width = 24;
+
+		adm_set_native_mode(msm_native_mode);
+		adm_num_ec_ref_rx_chans(msm_ec_ref_ch);
+		adm_ec_ref_rx_sampling_rate(msm_ec_ref_sampling_rate);
+		adm_ec_ref_rx_bit_width(bit_width);
+
+		msm_adm_override = override;
+	}
+	mutex_unlock(&adm_lock);
+
 	adm_ec_ref_rx_id(ec_ref_port_id);
 	pr_debug("%s: msm_route_ec_ref_rx = %d\n",
 	    __func__, msm_route_ec_ref_rx);
-	mutex_unlock(&routing_lock);
 	snd_soc_dapm_mux_update_power(widget->dapm, kcontrol,
 					msm_route_ec_ref_rx, e, update);
+	mutex_unlock(&routing_lock);
 	return 0;
 }
 
@@ -22548,6 +22607,7 @@ err:
 static int __init msm_soc_routing_platform_init(void)
 {
 	mutex_init(&routing_lock);
+	mutex_init(&adm_lock);
 	if (msm_routing_init_cal_data())
 		pr_err("%s: could not init cal data!\n", __func__);
 
@@ -22566,6 +22626,7 @@ static void __exit msm_soc_routing_platform_exit(void)
 	msm_routing_delete_cal_data();
 	memset(&be_dai_name_table, 0, sizeof(be_dai_name_table));
 	mutex_destroy(&routing_lock);
+	mutex_destroy(&adm_lock);
 	platform_driver_unregister(&msm_routing_pcm_driver);
 }
 module_exit(msm_soc_routing_platform_exit);
