@@ -763,11 +763,6 @@
 
 /* Audio */
 &soc {
-	qcom,msm-pcm {
-		qcom,msm-pcm-low-latency;
-		qcom,latency-level = "regular";
-	};
-
 	i2c@c1b7000 {
 		status = "ok";
 		test_tfa9891: tfa9891@36 {

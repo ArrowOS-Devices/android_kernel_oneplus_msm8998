@@ -60,6 +60,11 @@
 #define RATELIMIT_CALC_SHIFT	10
 
 /*
+ * Lock dirty background writeback to the dirty ratio divided by this number.
+ */
+#define LOCKED_DIRTY_RATIO	2
+
+/*
  * After a CPU has dirtied this many pages, balance_dirty_pages_ratelimited
  * will look to see if it needs to force writeback or throttling.
  */
@@ -87,7 +92,7 @@ unsigned long vm_dirty_bytes;
 /*
  * The interval between `kupdate'-style writebacks
  */
-unsigned int dirty_writeback_interval; /* centiseconds */
+unsigned int dirty_writeback_interval = 5 * 100; /* centiseconds */
 
 EXPORT_SYMBOL_GPL(dirty_writeback_interval);
 
@@ -357,10 +362,10 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 	const unsigned long available_memory = dtc->avail;
 	struct dirty_throttle_control *gdtc = mdtc_gdtc(dtc);
 	unsigned long bytes = vm_dirty_bytes;
-	unsigned long bg_bytes = bytes / 2;
+	unsigned long bg_bytes = vm_dirty_bytes / LOCKED_DIRTY_RATIO;
 	/* convert ratios to per-PAGE_SIZE for higher precision */
 	unsigned long ratio = (vm_dirty_ratio * PAGE_SIZE) / 100;
-	unsigned long bg_ratio = ratio / 2;
+	unsigned long bg_ratio = ratio / LOCKED_DIRTY_RATIO;
 	unsigned long thresh;
 	unsigned long bg_thresh;
 	struct task_struct *tsk;

@@ -1796,8 +1796,8 @@ long _do_fork(unsigned long clone_flags,
 	long nr;
 
 #ifdef CONFIG_DYNAMIC_STUNE
-	if (task_is_zygote(current) && dynstune_read_state())
-		dynstune_acquire_update();
+	if (task_is_zygote(current))
+		dynstune_acquire_update(CORE);
 #endif
 
 	/*
